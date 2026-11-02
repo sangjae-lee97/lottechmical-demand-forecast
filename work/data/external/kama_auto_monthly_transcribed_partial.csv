@@ -1,0 +1,9 @@
+period,vehicle_production_units,vehicle_export_units,publication_date,release_vintage,source_type,source_url,extraction_method,data_kind
+2025-09,334289,228189,2025-10-30,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12362&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2025-10,302819,202928,2025-11-27,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12365&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2025-11,354204,236560,2025-12-31,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12369&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2025-12,362564,244772,2026-01-29,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12374&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2026-05,329533,230264,2026-07-16,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12386&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2026-06,394331,268351,2026-07-28,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12388&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2026-08,206036,146989,2026-09-17,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12392&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
+2026-09,346564,237403,2026-10-19,confirmed,KAMA industry trends,"https://www.kama.or.kr/NewsController?board_id=12393&boardmaster_id=industry&cmd=V&menunum=0004",official_page_manual_transcription,public_observed
