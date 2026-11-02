@@ -24,3 +24,7 @@
 새 지표는 `indicator_id,period,value,unit,source_url,source_document_id,publication_date,available_at,vintage,status,collection_method,extraction_verified_at,scope,geography,aggregation,notes`의 **긴 형식(long-format)**으로 추가한다. 생산량/수출량을 묶은 이번 wide-format CSV는 2지표 첫 배치 검토용이며, 학습용 최종 스키마가 아니다.
 
 **상태:** 24~36개월 연속 데이터 없음. 다음 수집에서 KAMA 원본 XLSX 파일 접근 권한·직접 URL·이전 월보 수치 검증을 우선. 실패하면 권한을 우회하지 말고 산업통상부 공개 산업동향/KOSIS 경로를 대조하되 서로 다른 정의나 잠정/확정 판본을 합쳐 쓰지 않는다.
+
+## Batch 02 (2026-11-02) 추가 자료 상태
+
+[INDICATOR_BATCH_02.md](INDICATOR_BATCH_02.md)에 누락 5개 월 조사 결과를 기록. 산업통상부 2026-01(공식 HTML)과 KAMA 2026-02~03(잠정 HTML)의 정확 값 **3개월·6개 수치**는 `work/data/external/auto_production_export_batch02_official_mixed_vintages.csv`에 판본·출처와 함께 보관했다. 기존 KAMA 확정치 8개월과 **단일 확정판 시계열로 병합하지 않는다**. 2026-04/07은 확인된 반올림·이차 전사 수치만 있어 정확 KAMA 확정 수치 채택을 보류한다. KAMA XLSX 원본과 연속 24~36개월 데이터는 여전히 미확보.

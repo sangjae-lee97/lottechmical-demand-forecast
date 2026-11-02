@@ -1,0 +1,4 @@
+period,vehicle_production_units,vehicle_export_units,publication_date,release_vintage,source_organization,source_url,extraction_method,verification_status,data_kind
+2026-01,360500,246574,2026-02-19,official_ministry_published,산업통상부,https://www.motir.go.kr/kor/contents/197,official_html_explicit_units,first_party_verified_public_observation,public_observed
+2026-02,278248,189885,2026-03-18,kama_provisional,한국자동차모빌리티산업협회,https://www.kama.or.kr/NewsController?board_id=12376&boardmaster_id=industry&cmd=V&menunum=0004,official_html_explicit_units,first_party_verified_provisional,public_observed
+2026-03,387277,259635,2026-04-16,kama_provisional,한국자동차모빌리티산업협회,https://www.kama.or.kr/NewsController?board_id=12379&boardmaster_id=industry&cmd=V&menunum=0004,official_html_explicit_units,first_party_verified_provisional,public_observed
