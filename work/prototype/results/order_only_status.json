@@ -1,0 +1,20 @@
+{
+  "data_kind": "synthetic",
+  "origin": 47,
+  "target": 48,
+  "assumed_share": 0.45,
+  "order_3ma": 66.2741107023971,
+  "proxy_count": 0,
+  "ignored_inventory_reports": 15,
+  "max_used_available": 47,
+  "direct": null,
+  "with_state": null,
+  "state_mean": null,
+  "state_sd": null,
+  "state_forecast_low": null,
+  "state_forecast_high": null,
+  "max_used_period": 47,
+  "innovation_flags": 0,
+  "status": "NOT_IDENTIFIED",
+  "warning": "No recent proxy; order policy/share insufficient"
+}

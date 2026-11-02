@@ -1,0 +1,30 @@
+{
+  "prior_mean_t": 100.0,
+  "prior_variance": 2500.0,
+  "process_variance": 36.0,
+  "order_noise_sd_t": 45.0,
+  "proxy_noise_sd_t": 12.0,
+  "kg_per_unit": 2.0,
+  "shares": [
+    0.3,
+    0.45,
+    0.6
+  ],
+  "primary_share": 0.45,
+  "months": 48,
+  "eval_origins": [
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46
+  ],
+  "seeds": 20
+}
