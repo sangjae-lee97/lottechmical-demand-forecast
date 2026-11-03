@@ -4,3 +4,6 @@ __pycache__/
 .env
 .env.*
 work/prototype/results_check/
+
+# Local-only research data and licensed/raw snapshots
+work/data/local_only/
