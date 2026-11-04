@@ -16,6 +16,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from collect_round07c_ecos import ROOT, local_key
 
 STORE = ROOT / 'work/data/local_only/round11_snapshots'
+REPROCESSED = ROOT / 'work/data/local_only/round11_reprocessed'
+NORMALIZATION_VERSION = 2
 BASELINE = ROOT / 'work/data/local_only/round07c_ecos/normalized_snapshot.json'
 BASE_MANIFEST = BASELINE.parent / 'manifest.json'
 LOCK = ROOT / 'work/data/local_only/round10_prospective'
@@ -70,12 +72,23 @@ def shift(value, delta):
     return f'{number // 12:04}-{number % 12 + 1:02}'
 
 
-def number(value):
+def check_version(version):
+    check(type(version) is int and version in (1, 2), 'UNSUPPORTED_NORMALIZATION_VERSION')
+
+
+def number(value, normalization_version=2):
+    check_version(normalization_version)
     try:
         check(isinstance(value, (str, int, float)) and not isinstance(value, bool), 'INVALID_VALUE')
         result = Decimal(str(value))
         check(result.is_finite() and 0 <= result <= 200, 'INVALID_VALUE')
-        return str(result.normalize())
+        if normalization_version == 1:
+            # Archived v1 normalized.json AND diff.json require this exact spelling.
+            return str(result.normalize())
+        if result.is_zero():
+            return '0'
+        fixed = format(result, 'f')
+        return fixed.rstrip('0').rstrip('.') if '.' in fixed else fixed
     except (InvalidOperation, ValueError):
         raise PipelineError('INVALID_VALUE') from None
 
@@ -164,7 +177,8 @@ def metadata_ends(rows):
     return {code: min(ends['BD'], ends[code]) for code in SECTORS}
 
 
-def normalize(rows, code, observed_at, run_id):
+def normalize(rows, code, observed_at, run_id, normalization_version=2):
+    check_version(normalization_version)
     normalized, seen = [], set()
     for row in rows:
         check(isinstance(row, dict), 'INVALID_ROW_SHAPE')
@@ -178,7 +192,7 @@ def normalize(rows, code, observed_at, run_id):
         seen.add(target)
         normalized.append({'table_code': '512Y008', 'item_code1': 'BD', 'item_code2': code,
                            'forecast_target_month': target, 'survey_month': shift(target, -1),
-                           'value': number(row.get('DATA_VALUE')), 'raw_unit_name': row.get('UNIT_NAME'),
+                           'value': number(row.get('DATA_VALUE'), normalization_version), 'raw_unit_name': row.get('UNIT_NAME'),
                            'semantic_unit': 'index', 'semantic_unit_basis': 'prior BOK BSI methodology, not an invented API unit',
                            'observed_at': observed_at, 'publication_date': None, 'available_at': None,
                            'vintage_verified': False, 'snapshot_run_id': run_id, 'source': SOURCE,
@@ -187,7 +201,8 @@ def normalize(rows, code, observed_at, run_id):
     return sorted(normalized, key=lambda r: r['forecast_target_month'])
 
 
-def baseline_rows(raw):
+def baseline_rows(raw, normalization_version=2):
+    check_version(normalization_version)
     source = json.loads(raw)
     rows, keys = [], set()
     for r in source:
@@ -196,7 +211,7 @@ def baseline_rows(raw):
         check(month(target.replace('-', '')) == target and r['survey_month'] == shift(target, -1), 'INVALID_BASELINE_MONTH')
         check((code, target) not in keys, 'DUPLICATE_BASELINE_MONTH')
         keys.add((code, target))
-        rows.append({**r, 'value': number(r['value'])})
+        rows.append({**r, 'value': number(r['value'], normalization_version)})
     check(all(any(r['item_code2'] == code for r in rows) for code in SECTORS), 'INCOMPLETE_BASELINE')
     return rows
 
@@ -259,7 +274,7 @@ def collect_once():
               'stat_code': '512Y008', 'item_code': 'BD', 'cycle': 'M', 'sectors': SECTORS,
               'query_strategy': 'baseline first month through max(baseline last, official metadata end)',
               'publication_date': None, 'available_at': None, 'vintage_verified': False,
-              'runtime': sys.version.split()[0], 'normalization_version': 1,
+              'runtime': sys.version.split()[0], 'normalization_version': NORMALIZATION_VERSION,
               'unit_policy': 'BSI index; raw UNIT_NAME preserved including null',
               'baseline_source': BASELINE.relative_to(ROOT).as_posix(),
               'observed_at_meaning': 'Our series retrieval completion, not BOK publication or first vintage',
@@ -272,7 +287,7 @@ def collect_once():
         entries = json.loads(baseline_manifest)
         expected = [r['sha256'] for r in entries if r['file'] == BASELINE.name]
         check(expected == [sha(raw)], 'BASELINE_HASH_MISMATCH')
-        old = baseline_rows(raw)
+        old = baseline_rows(raw, NORMALIZATION_VERSION)
         save(folder, 'baseline/normalized_snapshot.json', raw, files, 'baseline')
         save(folder, 'baseline/manifest.json', baseline_manifest, files, 'baseline_evidence')
         key = local_key()
@@ -285,7 +300,7 @@ def collect_once():
             windows[code] = [start, end]
             rows = fetch('StatisticSearch', ['512Y008', 'M', start.replace('-', ''), end.replace('-', ''), 'BD', code],
                          key, folder, files, requests, 20)
-            new.extend(normalize(rows, code, requests[-1]['observed_at'], run_id))
+            new.extend(normalize(rows, code, requests[-1]['observed_at'], run_id, NORMALIZATION_VERSION))
         events, issues = validate_snapshot(old, new, windows)
         result['status'] = 'VALIDATED_SNAPSHOT_REVIEW_NOT_PROMOTED' if not issues else 'INVALID_QUARANTINED'
         exit_code = 0 if not issues else 2
@@ -341,30 +356,114 @@ def collect_once():
     return result, sha(manifest)
 
 
-def validate_run(run_id, expected_sha=None):
+def replay(folder, manifest, run_id, normalization_version):
+    check_version(normalization_version)
+    old = baseline_rows((folder / 'baseline/normalized_snapshot.json').read_bytes(), normalization_version)
+    new = []
+    for code in SECTORS:
+        pages = [r for r in manifest['requests'] if r['service'] == 'StatisticSearch' and r['parameters_without_key'][-1] == code]
+        rows = [row for page in pages for row in json.loads(safe_path(folder, page['raw_path']).read_bytes())['StatisticSearch']['row']]
+        new.extend(normalize(rows, code, pages[-1]['observed_at'], run_id, normalization_version))
+    events, issues = validate_snapshot(old, new, manifest['query_windows'])
+    return new, events, issues
+
+
+def validate_run(run_id, expected_sha=None, store=None):
     check(re.fullmatch(r'\d{8}T\d{12}_[0-9a-f]{12}', run_id) is not None, 'INVALID_RUN_ID')
-    folder = STORE / run_id
+    folder = (STORE if store is None else store) / run_id
     raw = (folder / 'manifest.json').read_bytes()
     local_digest = (folder / 'manifest.sha256').read_text().strip()
     check(sha(raw) == local_digest and (expected_sha is None or expected_sha == local_digest), 'MANIFEST_HASH_MISMATCH')
     manifest = json.loads(raw)
+    version = manifest.get('normalization_version')
+    check_version(version)
     for row in manifest['files']:
         blob = safe_path(folder, row['path']).read_bytes()
         check(sha(blob) == row['sha256'] and len(blob) == row['bytes'], 'ARCHIVED_FILE_HASH_MISMATCH')
+    if manifest.get('execution_mode') == 'OFFLINE_REPROCESSED':
+        parent_raw = (folder / 'parent/manifest.json').read_bytes()
+        check(sha(parent_raw) == manifest['parent_run']['manifest_sha256'], 'PARENT_MANIFEST_HASH_MISMATCH')
+        parent = json.loads(parent_raw)
+        check(parent['requests'] == manifest['requests'], 'ORIGINAL_OBSERVATION_PROVENANCE_CHANGED')
+        for row in parent['files']:
+            if row['kind'] in ('baseline', 'baseline_evidence', 'api_raw'):
+                check(sha(safe_path(folder, row['path']).read_bytes()) == row['sha256'], 'REUSED_INPUT_CHANGED')
+            elif row['kind'] == 'normalized':
+                check(sha((folder / 'parent/normalized.json').read_bytes()) == row['sha256'], 'PARENT_NORMALIZED_HASH_MISMATCH')
     if manifest['exit_code'] == 0:
-        old = baseline_rows((folder / 'baseline/normalized_snapshot.json').read_bytes())
-        new = []
-        for code in SECTORS:
-            pages = [r for r in manifest['requests'] if r['service'] == 'StatisticSearch' and r['parameters_without_key'][-1] == code]
-            rows = [row for page in pages for row in json.loads(safe_path(folder, page['raw_path']).read_bytes())['StatisticSearch']['row']]
-            new.extend(normalize(rows, code, pages[-1]['observed_at'], run_id))
+        new, events, issues = replay(folder, manifest, run_id, version)
         check(new == json.loads((folder / 'normalized.json').read_bytes()), 'NORMALIZATION_REPLAY_MISMATCH')
-        events, issues = validate_snapshot(old, new, manifest['query_windows'])
         check(events == json.loads((folder / 'diff.json').read_bytes()), 'DIFF_REPLAY_MISMATCH')
         check(summary(events, issues)['counts'] == manifest['counts'], 'CLASSIFICATION_REPLAY_MISMATCH')
     return {'run_id': run_id, 'manifest_sha256': local_digest, 'status': 'ARCHIVE_HASHES_VERIFIED_OFFLINE',
+            'normalization_version': version,
             'original_collection_status': manifest['status'], 'original_exit_code': manifest['exit_code'],
             'collection_passed': manifest['exit_code'] == 0, 'network_called': False}
+
+
+def tree_fingerprint(folder):
+    return {p.relative_to(folder).as_posix(): sha(p.read_bytes())
+            for p in sorted(folder.rglob('*')) if p.is_file()}
+
+
+def reprocess_run(run_id, expected_sha):
+    check(bool(expected_sha), 'PARENT_MANIFEST_DIGEST_REQUIRED')
+    verified = validate_run(run_id, expected_sha)
+    check(verified['collection_passed'], 'PARENT_COLLECTION_NOT_VALIDATED')
+    parent_folder = STORE / run_id
+    before, lock_before = tree_fingerprint(parent_folder), guard()
+    parent_raw = (parent_folder / 'manifest.json').read_bytes()
+    parent = json.loads(parent_raw)
+    parent_normalized_raw = (parent_folder / 'normalized.json').read_bytes()
+    previous = json.loads(parent_normalized_raw)
+    processed_at = now()
+    new_id = datetime.now(KST).strftime('%Y%m%dT%H%M%S%f') + '_' + uuid.uuid4().hex[:12]
+    # Replay reads original pages/timestamps; no key loader or HTTP function is used.
+    new, events, issues = replay(parent_folder, parent, new_id, 2)
+    old_values = {(r['item_code2'], r['forecast_target_month']): r['value'] for r in previous}
+    new_values = {(r['item_code2'], r['forecast_target_month']): r['value'] for r in new}
+    check(len(old_values) == len(previous) == len(new_values) == len(new)
+          and old_values.keys() == new_values.keys(), 'REPROCESS_ROW_KEYS_CHANGED')
+    check(all(Decimal(old_values[k]) == Decimal(new_values[k]) for k in old_values), 'REPROCESS_NUMERIC_VALUE_CHANGED')
+    check(not any('e' in value.lower() for value in new_values.values()), 'V2_SCIENTIFIC_NOTATION')
+    checks = {'rows': len(new), 'numeric_unchanged': len(new),
+              'value_text_changed': sum(old_values[k] != new_values[k] for k in old_values),
+              'parent_scientific_strings': sum('e' in v.lower() for v in old_values.values()),
+              'v2_scientific_strings': 0}
+    check(not issues and summary(events, issues)['counts'] == parent['counts'], 'REPROCESS_CLASSIFICATION_CHANGED')
+    folder = REPROCESSED / new_id
+    folder.mkdir(parents=True, exist_ok=False)
+    files = []
+    for row in parent['files']:
+        if row['kind'] in ('baseline', 'baseline_evidence', 'api_raw'):
+            save(folder, row['path'], safe_path(parent_folder, row['path']).read_bytes(), files, row['kind'])
+    save(folder, 'parent/manifest.json', parent_raw, files, 'parent_manifest')
+    save(folder, 'parent/normalized.json', parent_normalized_raw, files, 'parent_normalized')
+    save(folder, 'normalized.json', encoded(new), files, 'normalized')
+    save(folder, 'diff.json', encoded(events), files, 'diff')
+    for name in ('round11_ecos_snapshot_pipeline.py', 'collect_round07c_ecos.py'):
+        save(folder, 'source/' + name, (ROOT / 'work/research' / name).read_bytes(), files, 'source')
+    after, lock_after = tree_fingerprint(parent_folder), guard()
+    check(before == after and lock_before == lock_after, 'PROTECTED_ARCHIVE_CHANGED')
+    result = {**parent, **summary(events, issues), 'run_id': new_id, 'normalization_version': 2,
+              'execution_mode': 'OFFLINE_REPROCESSED', 'network_calls_this_run': 0,
+              'requests_meaning': 'Original parent HTTP provenance, not requests made by this reprocessing run',
+              'started_at': processed_at, 'processed_at': processed_at, 'finished_at': now(),
+              'status': 'REPROCESSED_NOT_PROMOTED', 'exit_code': 0, 'files': files,
+              'reprocessing_checks': checks,
+              'parent_run': {'run_id': run_id, 'manifest_sha256': expected_sha,
+                             'normalization_version': parent['normalization_version'],
+                             'file_count': len(before), 'tree_sha256_before': sha(encoded(before)),
+                             'tree_sha256_after': sha(encoded(after)), 'unchanged': True},
+              'round10_integrity': {'before': lock_before, 'after': lock_after, 'unchanged': True},
+              'source_file_sha256': {r['path']: r['sha256'] for r in files if r['kind'] == 'source'},
+              'source_git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()}
+    raw = encoded(result)
+    with (folder / 'manifest.json').open('xb') as file:
+        file.write(raw)
+    with (folder / 'manifest.sha256').open('xb') as file:
+        file.write((sha(raw) + '\n').encode())
+    return result, sha(raw)
 
 
 def main(argv=None):
@@ -372,15 +471,26 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--collect', action='store_true')
     mode.add_argument('--validate-run')
+    mode.add_argument('--reprocess-run')
+    mode.add_argument('--validate-reprocessed')
     parser.add_argument('--expected-manifest-sha256')
     args = parser.parse_args(argv)
     try:
-        if args.validate_run:
-            result = validate_run(args.validate_run, args.expected_manifest_sha256)
+        if args.validate_run or args.validate_reprocessed:
+            result = validate_run(args.validate_run or args.validate_reprocessed, args.expected_manifest_sha256,
+                                  REPROCESSED if args.validate_reprocessed else STORE)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return result['original_exit_code']
+        if args.reprocess_run:
+            result, digest_value = reprocess_run(args.reprocess_run, args.expected_manifest_sha256)
+            public = {k: result[k] for k in ('run_id', 'normalization_version', 'execution_mode', 'processed_at',
+                                           'status', 'parent_run', 'reprocessing_checks', 'counts',
+                                           'network_calls_this_run', 'round10_integrity')}
+            public['manifest_sha256'] = digest_value
+            print(json.dumps(public, ensure_ascii=False, indent=2))
+            return result['exit_code']
         result, digest_value = collect_once()
-        public = {k: result[k] for k in ('run_id', 'status', 'started_at', 'finished_at', 'counts', 'ranges',
+        public = {k: result[k] for k in ('run_id', 'normalization_version', 'status', 'started_at', 'finished_at', 'counts', 'ranges',
                                        'changed_keys', 'validation_issues', 'review_required', 'observed_rows')}
         public.update({'manifest_sha256': digest_value, 'round10_integrity_unchanged': result.get('round10_integrity', {}).get('unchanged', False),
                        'official_correction_confirmed': False, 'model_input_promoted': False})
