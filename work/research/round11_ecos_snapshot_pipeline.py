@@ -216,6 +216,34 @@ def baseline_rows(raw, normalization_version=2):
     return rows
 
 
+def validate_dataset(rows, role='BASELINE', fixed_point=False):
+    """Policy 2 gate. Historical archive replay intentionally keeps policy 1."""
+    check(role in ('BASELINE', 'SNAPSHOT'), 'INVALID_VALIDATION_ROLE')
+    check(isinstance(rows, list) and bool(rows), role + '_EMPTY')
+    periods = {code: [] for code in SECTORS}
+    for row in rows:
+        check(isinstance(row, dict), role + '_INVALID_ROW')
+        code, target = row.get('item_code2'), row.get('forecast_target_month')
+        check(code in SECTORS and (row.get('table_code'), row.get('item_code1')) == ('512Y008', 'BD'), role + '_WRONG_CODES')
+        check(isinstance(target, str) and re.fullmatch(r'\d{4}-\d{2}', target) is not None, role + '_INVALID_MONTH')
+        try:
+            check(month(target.replace('-', '')) == target, role + '_INVALID_MONTH')
+        except PipelineError:
+            raise PipelineError(role + '_INVALID_MONTH') from None
+        check(target not in periods[code], role + '_DUPLICATE_MONTH')
+        check(row.get('survey_month') == shift(target, -1), role + '_SURVEY_MONTH_MISMATCH')
+        value = number(row.get('value'), 2)
+        if fixed_point:
+            check(isinstance(row.get('value'), str) and value == row['value'], role + '_NONCANONICAL_V2_VALUE')
+        periods[code].append(target)
+    for values in periods.values():
+        check(bool(values), role + '_MISSING_SECTOR')
+        values.sort()
+        check(values == [shift(values[0], i) for i in range(len(values))], role + '_INTERNAL_GAP')
+    check(periods['C3000'] == periods['C0000'], role + '_SECTOR_RANGE_MISMATCH')
+    return periods
+
+
 def compare(old, new, windows):
     old = {(r['item_code2'], r['forecast_target_month']): r for r in old}
     new = {(r['item_code2'], r['forecast_target_month']): r for r in new}
@@ -237,8 +265,25 @@ def compare(old, new, windows):
     return events
 
 
-def validate_snapshot(old, new, windows):
+def compare_strict(old, new, windows):
+    old_periods = validate_dataset(old, 'BASELINE')
+    validate_dataset(new, 'SNAPSHOT')
+    events = compare(old, new, windows)
+    for event in events:
+        if event['classification'] == 'NEW_TARGET_MONTH' and event['forecast_target_month'] < old_periods[event['item_code2']][0]:
+            event['classification'] = 'HISTORICAL_EXTENSION'
+    return events
+
+
+def validate_snapshot(old, new, windows, policy_version=1):
     issues = []
+    check(policy_version in (1, 2), 'UNSUPPORTED_VALIDATION_POLICY')
+    if policy_version == 2:
+        validate_dataset(old, 'BASELINE')
+        try:
+            validate_dataset(new, 'SNAPSHOT')
+        except PipelineError as error:
+            issues.append({'code': str(error)})
     months = {code: sorted(r['forecast_target_month'] for r in new if r['item_code2'] == code) for code in SECTORS}
     for code, periods in months.items():
         if not periods:
@@ -249,16 +294,17 @@ def validate_snapshot(old, new, windows):
             issues.append({'code': 'OBSERVATION_OUTSIDE_REQUEST', 'item_code2': code})
     if months['C3000'] != months['C0000']:
         issues.append({'code': 'SECTOR_MONTH_RANGE_MISMATCH'})
-    events = compare(old, new, windows)
+    events = compare_strict(old, new, windows) if policy_version == 2 and not issues else compare(old, new, windows)
     if any(e['classification'] == 'MISSING_OR_REMOVED' for e in events):
         issues.append({'code': 'BASELINE_MONTH_MISSING'})
     return events, issues
 
 
-def summary(events, issues):
+def summary(events, issues, policy_version=1):
     counts = Counter(e['classification'] for e in events)
     counts['INVALID_OR_UNVERIFIED'] += len(issues)
-    return {'counts': {k: counts[k] for k in KINDS}, 'validation_issues': issues,
+    kinds = KINDS + ('HISTORICAL_EXTENSION',) if policy_version == 2 else KINDS
+    return {'counts': {k: counts[k] for k in kinds}, 'validation_issues': issues,
             'changed_keys': [{k: e[k] for k in ('classification', 'item_code2', 'forecast_target_month')}
                              for e in events if e['classification'] != 'UNCHANGED'],
             'review_required': bool(issues or any(e['classification'] != 'UNCHANGED' for e in events)),
@@ -275,6 +321,7 @@ def collect_once():
               'query_strategy': 'baseline first month through max(baseline last, official metadata end)',
               'publication_date': None, 'available_at': None, 'vintage_verified': False,
               'runtime': sys.version.split()[0], 'normalization_version': NORMALIZATION_VERSION,
+              'validation_policy_version': 2,
               'unit_policy': 'BSI index; raw UNIT_NAME preserved including null',
               'baseline_source': BASELINE.relative_to(ROOT).as_posix(),
               'observed_at_meaning': 'Our series retrieval completion, not BOK publication or first vintage',
@@ -290,6 +337,7 @@ def collect_once():
         old = baseline_rows(raw, NORMALIZATION_VERSION)
         save(folder, 'baseline/normalized_snapshot.json', raw, files, 'baseline')
         save(folder, 'baseline/manifest.json', baseline_manifest, files, 'baseline_evidence')
+        validate_dataset(old, 'BASELINE')
         key = local_key()
         check(bool(key), 'LOCAL_KEY_NOT_CONFIGURED')
         ends = metadata_ends(fetch('StatisticItemList', ['512Y008'], key, folder, files, requests, 1000))
@@ -301,7 +349,7 @@ def collect_once():
             rows = fetch('StatisticSearch', ['512Y008', 'M', start.replace('-', ''), end.replace('-', ''), 'BD', code],
                          key, folder, files, requests, 20)
             new.extend(normalize(rows, code, requests[-1]['observed_at'], run_id, NORMALIZATION_VERSION))
-        events, issues = validate_snapshot(old, new, windows)
+        events, issues = validate_snapshot(old, new, windows, 2)
         result['status'] = 'VALIDATED_SNAPSHOT_REVIEW_NOT_PROMOTED' if not issues else 'INVALID_QUARANTINED'
         exit_code = 0 if not issues else 2
     except PipelineError as error:
@@ -320,7 +368,7 @@ def collect_once():
         result['status'], exit_code = 'FAILED_QUARANTINED', 1
     if issues and exit_code == 0:
         result['status'], exit_code = 'INVALID_QUARANTINED', 2
-    result.update(summary(events, issues))
+    result.update(summary(events, issues, 2))
     result['requests'] = requests
     result['query_windows'] = windows
     result['observed_rows'] = len(new)
@@ -364,7 +412,7 @@ def replay(folder, manifest, run_id, normalization_version):
         pages = [r for r in manifest['requests'] if r['service'] == 'StatisticSearch' and r['parameters_without_key'][-1] == code]
         rows = [row for page in pages for row in json.loads(safe_path(folder, page['raw_path']).read_bytes())['StatisticSearch']['row']]
         new.extend(normalize(rows, code, pages[-1]['observed_at'], run_id, normalization_version))
-    events, issues = validate_snapshot(old, new, manifest['query_windows'])
+    events, issues = validate_snapshot(old, new, manifest['query_windows'], manifest.get('validation_policy_version', 1))
     return new, events, issues
 
 
@@ -394,7 +442,7 @@ def validate_run(run_id, expected_sha=None, store=None):
         new, events, issues = replay(folder, manifest, run_id, version)
         check(new == json.loads((folder / 'normalized.json').read_bytes()), 'NORMALIZATION_REPLAY_MISMATCH')
         check(events == json.loads((folder / 'diff.json').read_bytes()), 'DIFF_REPLAY_MISMATCH')
-        check(summary(events, issues)['counts'] == manifest['counts'], 'CLASSIFICATION_REPLAY_MISMATCH')
+        check(summary(events, issues, manifest.get('validation_policy_version', 1))['counts'] == manifest['counts'], 'CLASSIFICATION_REPLAY_MISMATCH')
     return {'run_id': run_id, 'manifest_sha256': local_digest, 'status': 'ARCHIVE_HASHES_VERIFIED_OFFLINE',
             'normalization_version': version,
             'original_collection_status': manifest['status'], 'original_exit_code': manifest['exit_code'],
@@ -430,7 +478,8 @@ def reprocess_run(run_id, expected_sha):
               'value_text_changed': sum(old_values[k] != new_values[k] for k in old_values),
               'parent_scientific_strings': sum('e' in v.lower() for v in old_values.values()),
               'v2_scientific_strings': 0}
-    check(not issues and summary(events, issues)['counts'] == parent['counts'], 'REPROCESS_CLASSIFICATION_CHANGED')
+    policy = parent.get('validation_policy_version', 1)
+    check(not issues and summary(events, issues, policy)['counts'] == parent['counts'], 'REPROCESS_CLASSIFICATION_CHANGED')
     folder = REPROCESSED / new_id
     folder.mkdir(parents=True, exist_ok=False)
     files = []
@@ -445,7 +494,7 @@ def reprocess_run(run_id, expected_sha):
         save(folder, 'source/' + name, (ROOT / 'work/research' / name).read_bytes(), files, 'source')
     after, lock_after = tree_fingerprint(parent_folder), guard()
     check(before == after and lock_before == lock_after, 'PROTECTED_ARCHIVE_CHANGED')
-    result = {**parent, **summary(events, issues), 'run_id': new_id, 'normalization_version': 2,
+    result = {**parent, **summary(events, issues, policy), 'run_id': new_id, 'normalization_version': 2,
               'execution_mode': 'OFFLINE_REPROCESSED', 'network_calls_this_run': 0,
               'requests_meaning': 'Original parent HTTP provenance, not requests made by this reprocessing run',
               'started_at': processed_at, 'processed_at': processed_at, 'finished_at': now(),
